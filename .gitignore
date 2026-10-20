@@ -342,3 +342,10 @@ ASALocalRun/
 healthchecksdb
 
 MaskFiles/
+
+# Restoration build outputs (produced locally by tools/ and in the Actions workflow)
+/build-inputs/
+/verification/
+/jitcheck/
+/smoke-results/
+/artifacts/

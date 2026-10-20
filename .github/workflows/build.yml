@@ -49,6 +49,11 @@ jobs:
           dotnet tool install dotnet-ilverify --version 8.0.0 --tool-path "$env:RUNNER_TEMP/ilverify"
       - name: Compare IL verification against the original
         run: python tools/verification/verify_binaries.py --original build-inputs/original.exe --patched artifacts/PCL-2.99-restored.exe --ilverify "$env:RUNNER_TEMP/ilverify/ILVerify.exe" --output verification
+      # ILVerify accepts bodies the CLR rejects (it ignores MaxStackSize and the importer's
+      # handler rules), so ask the runtime to compile every patched method as well.
+      - name: JIT-compile every patched method
+        shell: powershell
+        run: ./tools/verification/jitcheck.ps1 -Executable artifacts/PCL-2.99-restored.exe -PatchReport artifacts/PCL-2.99-restored.exe.patch.json -OutputDirectory jitcheck
       - name: Windows startup smoke test
         run: ./tools/verification/smoke.ps1 -Executable artifacts/PCL-2.99-restored.exe -OutputDirectory smoke-results
       - name: Record checksums
@@ -67,6 +72,7 @@ jobs:
           name: restoration-verification
           path: |
             verification/
+            jitcheck/
             smoke-results/
           retention-days: 30
           if-no-files-found: warn
@@ -99,9 +105,13 @@ jobs:
         run: msbuild "Plain Craft Launcher 2/Plain Craft Launcher 2.vbproj" /p:Configuration=Snapshot /p:Platform=AnyCPU /m /nologo /verbosity:minimal
       - name: Package the source build
         run: |
-          Copy-Item 'Plain Craft Launcher 2/obj/Snapshot/Plain Craft Launcher 2.exe' artifacts/PCL-Snapshot-restored-source.exe
+          $exe = 'Plain Craft Launcher 2/obj/Snapshot/Plain Craft Launcher 2.exe'
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Snapshot output not found: $exe" }
+          Copy-Item $exe artifacts/PCL-Snapshot-restored-source.exe
           Copy-Item docs/RESTORATION.md artifacts/README.md
           (Get-FileHash artifacts/PCL-Snapshot-restored-source.exe -Algorithm SHA256).Hash.ToLower() + '  PCL-Snapshot-restored-source.exe' | Set-Content artifacts/SHA256SUMS.txt
+      - name: Windows startup smoke test
+        run: ./tools/verification/smoke.ps1 -Executable artifacts/PCL-Snapshot-restored-source.exe -OutputDirectory smoke-results
       - uses: actions/upload-artifact@v7
         with:
           name: PCL-Snapshot-restored-source

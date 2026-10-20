@@ -30,6 +30,29 @@ report. Input hashes must match the patch report. Logs, dependency hashes, and
 results are written to the output directory. The original sample has one existing
 generic-delegate assignment verification error outside the changed methods.
 
+## JIT acceptance
+
+```powershell
+powershell -File tools/verification/jitcheck.ps1 `
+  -Executable artifacts/PCL-2.99-restored.exe `
+  -PatchReport artifacts/PCL-2.99-restored.exe.patch.json `
+  -OutputDirectory jitcheck
+```
+
+ILVerify is a verifier: it checks types, stack shapes and exception-region shape, but it never asks
+the runtime's importer to accept a body, and it ignores the method header's `MaxStackSize`. A body
+can verify cleanly and still throw `System.InvalidProgramException` the first time it is compiled,
+because JIT is lazy — the 2.99 restoration shipped exactly that defect: the modpack dispatcher was
+left with a `try` block falling through into its `finally` handler, and it only surfaced when a
+user installed a modpack.
+
+This step loads the patched EXE, extracts the managed dependencies it embeds into
+`<OutputDirectory>/references` (override with `-ReferenceDirectory`), and asks the CLR to compile
+every method named in the patch report through `RuntimeHelpers.PrepareMethod`. Methods are compiled,
+never executed; `jitcheck.json` records the result per method and the step fails on
+`InvalidProgramException`. It must run under Windows PowerShell 5.1 (`powershell.exe`): the payload
+targets .NET Framework 4.8 and cannot be loaded by PowerShell 7.
+
 ## Windows startup smoke
 
 ```powershell

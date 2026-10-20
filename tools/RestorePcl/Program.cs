@@ -114,7 +114,15 @@ internal static class Program
         var anchor = At(pack, 0x2da);
         var finallyStart = At(pack, 0x2e5);
         if (!(anchor.Operand as string ?? "").Contains("法律法规")) throw new InvalidOperationException("Unexpected modpack gate");
-        foreach (var x in pack.Body.Instructions.SkipWhile(i => i != anchor).TakeWhile(i => i != finallyStart).ToArray()) Nop(x);
+        // The gate is `ldstr; newobj Exception; throw` and closes the outer try block. The ldstr is
+        // the inner `leave` target, so it has to stay as a NOP; the remaining instructions have to be
+        // deleted instead of NOP'd. Leftover NOPs make the try block fall through into its finally
+        // handler, which the CLR rejects with InvalidProgramException on first JIT even though
+        // ILVerify accepts the method.
+        var gate = pack.Body.Instructions.SkipWhile(i => i != anchor).TakeWhile(i => i != finallyStart).ToArray();
+        if (gate.Length < 2 || gate[gate.Length - 1].OpCode != OpCodes.Throw) throw new InvalidOperationException("Unexpected modpack gate shape");
+        foreach (var x in gate.Skip(1)) pack.Body.Instructions.Remove(x);
+        Nop(anchor);
         var result = new VariableDefinition(pack.ReturnType); pack.Body.Variables.Add(result);
         var returnStart = I(OpCodes.Ldloc, result);
         var returnEnd = I(OpCodes.Ret);
@@ -257,8 +265,30 @@ internal static class Program
             foreach(var eh in body.ExceptionHandlers)
                 foreach(var i in new[]{eh.TryStart,eh.TryEnd,eh.HandlerStart,eh.HandlerEnd,eh.FilterStart})
                     if(i!=null && !set.Contains(i)) throw new InvalidOperationException("Dangling exception boundary in "+m.FullName);
+            if (!changed.Contains(m)) continue;
+            // Two rules the CLR's importer enforces but ILVerify does not: a try block must not fall
+            // through into its handler, and a finally handler must end with endfinally. Breaking
+            // either one yields a method that verifies cleanly and then throws
+            // InvalidProgramException the first time it is compiled.
+            foreach(var eh in body.ExceptionHandlers)
+            {
+                var last = PreviousInstruction(body, eh.TryEnd);
+                if (!TransfersControl(last)) throw new InvalidOperationException($"Try block falls through into its handler in {m.FullName} at IL_0x{last.Offset:x4}");
+                if (eh.HandlerType == ExceptionHandlerType.Finally && PreviousInstruction(body, eh.HandlerEnd).OpCode != OpCodes.Endfinally)
+                    throw new InvalidOperationException("Finally handler does not end with endfinally in "+m.FullName);
+            }
         }
     }
+    static Instruction PreviousInstruction(MethodBody body, Instruction boundary)
+    {
+        var index = boundary == null ? body.Instructions.Count : body.Instructions.IndexOf(boundary);
+        if (index <= 0) throw new InvalidOperationException("Empty exception region in " + body.Method.FullName);
+        return body.Instructions[index - 1];
+    }
+    static bool TransfersControl(Instruction i) =>
+        i.OpCode == OpCodes.Br || i.OpCode == OpCodes.Br_S || i.OpCode == OpCodes.Leave || i.OpCode == OpCodes.Leave_S ||
+        i.OpCode == OpCodes.Throw || i.OpCode == OpCodes.Rethrow || i.OpCode == OpCodes.Ret ||
+        i.OpCode == OpCodes.Endfinally || i.OpCode == OpCodes.Endfilter || i.OpCode == OpCodes.Jmp;
     static int Main(string[] args)
     {
         if(args.Length!=3) { Console.Error.WriteLine("Usage: RestorePcl old.exe latest.exe output.exe"); return 2; }
