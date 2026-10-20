@@ -1,0 +1,110 @@
+name: Restore downloads and build Snapshot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Plain Craft Launcher 2/**'
+      - 'PCLCS/**'
+      - 'MeloongCore'
+      - 'tools/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: restore-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  restored:
+    name: Restore and verify the official EXE
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install metadata readers
+        run: python -m pip install dnfile==0.18.0 dncil==1.0.2
+      - name: Obtain and verify immutable upstream inputs
+        run: python tools/prepare_inputs.py
+      - name: Build the restoration tool in GitHub
+        run: dotnet build tools/RestorePcl/RestorePcl.csproj --configuration Release --nologo
+      - name: Restore the audited official EXE
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          dotnet tools/RestorePcl/bin/Release/net8.0/RestorePcl.dll build-inputs/donor-2.14.exe build-inputs/original.exe artifacts/PCL-2.99-restored.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item docs/RESTORATION.md artifacts/README.md
+          Copy-Item build-inputs/inputs.json artifacts/inputs.json
+      - name: Install static verification tools
+        run: |
+          dotnet tool install dotnet-ilverify --version 8.0.0 --tool-path "$env:RUNNER_TEMP/ilverify"
+      - name: Compare IL verification against the original
+        run: python tools/verification/verify_binaries.py --original build-inputs/original.exe --patched artifacts/PCL-2.99-restored.exe --ilverify "$env:RUNNER_TEMP/ilverify/ILVerify.exe" --output verification
+      - name: Windows startup smoke test
+        run: ./tools/verification/smoke.ps1 -Executable artifacts/PCL-2.99-restored.exe -OutputDirectory smoke-results
+      - name: Record checksums
+        run: |
+          (Get-FileHash artifacts/PCL-2.99-restored.exe -Algorithm SHA256).Hash.ToLower() + '  PCL-2.99-restored.exe' | Set-Content artifacts/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        if: success()
+        with:
+          name: PCL-2.99-restored
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: restoration-verification
+          path: |
+            verification/
+            smoke-results/
+          retention-days: 30
+          if-no-files-found: warn
+
+  snapshot:
+    name: Build restored Snapshot from public source
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '9.0.x'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: microsoft/setup-msbuild@v3
+        with:
+          msbuild-architecture: x64
+      - name: Prepare optional fork-owned service settings
+        env:
+          PCL_BUILD_CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          PCL_BUILD_CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+        run: python tools/prepare_source.py
+      - name: Restore project packages
+        run: dotnet restore PCLCS/PCLCS.csproj
+      - name: Build the Snapshot configuration
+        run: msbuild "Plain Craft Launcher 2/Plain Craft Launcher 2.vbproj" /p:Configuration=Snapshot /p:Platform=AnyCPU /m /nologo /verbosity:minimal
+      - name: Package the source build
+        run: |
+          Copy-Item 'Plain Craft Launcher 2/obj/Snapshot/Plain Craft Launcher 2.exe' artifacts/PCL-Snapshot-restored-source.exe
+          Copy-Item docs/RESTORATION.md artifacts/README.md
+          (Get-FileHash artifacts/PCL-Snapshot-restored-source.exe -Algorithm SHA256).Hash.ToLower() + '  PCL-Snapshot-restored-source.exe' | Set-Content artifacts/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: PCL-Snapshot-restored-source
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: error
